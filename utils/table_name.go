@@ -53,8 +53,8 @@ func CamelCaseToSnakeCase(name string) string {
 	return buf.String()
 }
 
-// ConvertToMySqlTableName convert the type name of a object to a table name. lower case
-func ConvertToMySqlTableName(obj interface{}) string {
+// ConvertToMySQLTableName convert the type name of a object to a table name. lower case
+func ConvertToMySQLTableName(obj interface{}) string {
 
 	tab := fmt.Sprintf("%s", reflect.TypeOf(obj))
 	index := strings.Index(tab, ".") + 1
