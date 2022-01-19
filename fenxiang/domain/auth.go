@@ -9,12 +9,14 @@ import (
 	"io/ioutil"
 	"net/http"
 	"reflect"
+	"time"
 
 	"github.com/power28-china/auth/config"
 	"github.com/power28-china/auth/database/mongo"
 	"github.com/power28-china/auth/utils/logger"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	mongodb "go.mongodb.org/mongo-driver/mongo"
 )
 
 var (
@@ -55,8 +57,78 @@ func (e *InvalidPtrError) Error() string {
 	return "json: Unmarshal(nil " + e.Type.String() + ")"
 }
 
+// Authentication represents the methods for the fenxiang OpenAPI authentication.
+type Authentication interface {
+	Auth() error
+	GetAuth() error
+}
+
+// GetAuth get corperation access token and ID from database.
+func (auth *AuthApp) GetAuth() error {
+	if err := mongo.Find(config.Config("AUTH_COLLECTION"), "appid", config.Config("APP_ID")).Decode(auth); err != nil {
+		if err == mongodb.ErrNoDocuments {
+			// if authentication information for app is not available, call `AppAuth` method to create one.
+			logger.Sugar.Infof("No APP authentication founded from database, will recreate it after 2 seconds.\n")
+			time.Sleep(2 * time.Second)
+			if err = auth.Auth(); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+
+	resp := map[string]interface{}{}
+	// make sure the app authentication is valid.
+	for {
+		if err := auth.tryToQueryAPI(resp); err != nil {
+			return err
+		}
+
+		// spew.Dump(resp)
+
+		// if App authentication is invalid, delete app authentication in database and  retry to get new authentication.
+		if resp["errorCode"].(float64) == 20016 {
+			logger.Sugar.Infof("APP authentication is invalid, recreate it now.")
+			mongo.Delete(config.Config("AUTH_COLLECTION"), "appid", config.Config("APP_ID"))
+			// logger.Sugar.Debugf("old authentication: %v", appAuth.CorpAccessToken)
+			if err = auth.Auth(); err != nil {
+				return err
+			}
+			// logger.Sugar.Debugf("new authentication: %v", appAuth.CorpAccessToken)
+			continue
+		}
+
+		if resp["errorCode"].(float64) == 20003 {
+			logger.Sugar.Infof("Param illegal exception, try again after 2 seconds.")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if resp["errorCode"].(float64) == 504 {
+			logger.Sugar.Infof("Gateway Timeout, try again after 2 seconds.")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if resp["errorCode"].(float64) != 0 {
+			errMessage := fmt.Sprintf("Error Message for getAppAuthentication: %s(%f)", resp["errorMessage"], resp["errorCode"])
+			logger.Sugar.Infof(errMessage)
+			err := errors.New(errMessage)
+			return err
+		}
+
+		if resp["errorCode"].(float64) == 0 {
+			break
+		}
+	}
+
+	logger.Sugar.Infof("Get App Authentication from database. token:%s", auth.CorpAccessToken)
+	return nil
+}
+
 // Auth get corperation access token and ID from AppAuthResponse object.
-func (authApp *AuthApp) Auth() error {
+func (auth *AuthApp) Auth() error {
 
 	request := make(map[string]interface{})
 
@@ -77,17 +149,17 @@ func (authApp *AuthApp) Auth() error {
 		return err
 	}
 
-	authApp.AppID = config.Config("APP_ID")
-	authApp.CorpAccessToken = appAuthResponse.AuthApp.CorpAccessToken
-	authApp.CorpID = appAuthResponse.AuthApp.CorpID
-	authApp.ExpiresIn = appAuthResponse.AuthApp.ExpiresIn
+	auth.AppID = config.Config("APP_ID")
+	auth.CorpAccessToken = appAuthResponse.AuthApp.CorpAccessToken
+	auth.CorpID = appAuthResponse.AuthApp.CorpID
+	auth.ExpiresIn = appAuthResponse.AuthApp.ExpiresIn
 
 	// save result in database.
-	filter := bson.D{primitive.E{Key: "appid", Value: authApp.AppID}}
+	filter := bson.D{primitive.E{Key: "appid", Value: auth.AppID}}
 	update := bson.D{primitive.E{Key: "$set", Value: bson.D{
-		primitive.E{Key: "corpaccesstoken", Value: authApp.CorpAccessToken},
-		primitive.E{Key: "corpid", Value: authApp.CorpID},
-		primitive.E{Key: "expiresin", Value: authApp.ExpiresIn}}}}
+		primitive.E{Key: "corpaccesstoken", Value: auth.CorpAccessToken},
+		primitive.E{Key: "corpid", Value: auth.CorpID},
+		primitive.E{Key: "expiresin", Value: auth.ExpiresIn}}}}
 	mongo.Update(config.Config("AUTH_COLLECTION"), filter, update)
 
 	// Create TTL Index for the collection.
@@ -95,6 +167,32 @@ func (authApp *AuthApp) Auth() error {
 		return err
 	}
 
+	return nil
+}
+
+func (auth *AuthApp) tryToQueryAPI(response map[string]interface{}) error {
+	queryInfo := make(map[string]interface{})
+	queryInfo["offset"] = 0
+	queryInfo["limit"] = 1
+	queryInfo["filters"] = []interface{}{}
+	queryInfo["orders"] = []interface{}{}
+	queryInfo["fieldProjection"] = []string{"name"}
+
+	data := make(map[string]interface{})
+	data["search_query_info"] = queryInfo
+	data["dataObjectApiName"] = "AccountObj"
+
+	request := make(map[string]interface{})
+	request["corpAccessToken"] = auth.CorpAccessToken
+	request["corpId"] = auth.CorpID
+	request["currentOpenUserId"] = config.Config("CURRENT_OPENUSER_ID")
+	request["data"] = data
+
+	if err := query("POST", config.Config("API_QUERY_URL"), request, &response); err != nil {
+		return err
+	}
+
+	logger.Sugar.Debugf("query API successfully with token: %v", auth.CorpAccessToken)
 	return nil
 }
 

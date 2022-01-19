@@ -14,3 +14,12 @@ func TestAppAuth(t *testing.T) {
 	}
 	logger.Sugar.Debugf("AppAuth: %#v", auth)
 }
+
+func TestGetAuth(t *testing.T) {
+	auth := &AuthApp{}
+	err := auth.GetAuth()
+	if err != nil {
+		t.Errorf("TestGetAuth failed: %v", err)
+	}
+	logger.Sugar.Debugf("GetAuth: %#v", auth)
+}
